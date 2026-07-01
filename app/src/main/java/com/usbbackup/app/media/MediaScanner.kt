@@ -25,9 +25,13 @@ class MediaScanner(
             MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO.toString()
         )
 
-        val uri = MediaStore.Files.getContentUri("external")
-
-        contentResolver.query(uri, projection, selection, selectionArgs, null)?.use { cursor ->
+        contentResolver.query(
+            MediaStore.Files.getContentUri("external"),
+            projection,
+            selection,
+            selectionArgs,
+            null
+        )?.use { cursor ->
             val typeColumn = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.MEDIA_TYPE)
             val sizeColumn = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.SIZE)
 
@@ -50,6 +54,11 @@ class MediaScanner(
     }
 
     fun getFirstPhoto(): MediaItem? {
+        return getAllPhotos().firstOrNull()
+    }
+
+    fun getAllPhotos(): List<MediaItem> {
+        val photos = mutableListOf<MediaItem>()
         val uri = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
 
         val projection = arrayOf(
@@ -66,23 +75,28 @@ class MediaScanner(
             null,
             "${MediaStore.Images.Media.DATE_ADDED} DESC"
         )?.use { cursor ->
-            if (cursor.moveToFirst()) {
-                val id = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID))
-                val name = cursor.getString(cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME))
-                    ?: "photo_test.jpg"
-                val mime = cursor.getString(cursor.getColumnIndexOrThrow(MediaStore.Images.Media.MIME_TYPE))
-                    ?: "image/jpeg"
-                val size = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.Images.Media.SIZE))
+            val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
+            val nameColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)
+            val mimeColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.MIME_TYPE)
+            val sizeColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.SIZE)
 
-                return MediaItem(
-                    uri = ContentUris.withAppendedId(uri, id),
-                    name = name,
-                    mimeType = mime,
-                    size = size
+            while (cursor.moveToNext()) {
+                val id = cursor.getLong(idColumn)
+                val name = cursor.getString(nameColumn) ?: "photo_$id.jpg"
+                val mime = cursor.getString(mimeColumn) ?: "image/jpeg"
+                val size = cursor.getLong(sizeColumn)
+
+                photos.add(
+                    MediaItem(
+                        uri = ContentUris.withAppendedId(uri, id),
+                        name = name,
+                        mimeType = mime,
+                        size = size
+                    )
                 )
             }
         }
 
-        return null
+        return photos
     }
 }

@@ -25,7 +25,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import com.usbbackup.app.backup.BackupLogLine
 import com.usbbackup.app.backup.BackupManager
+import com.usbbackup.app.backup.BackupProgress
+import com.usbbackup.app.backup.LogType
 import com.usbbackup.app.media.MediaScanner
 import com.usbbackup.app.media.MediaStats
 import com.usbbackup.app.usb.UsbStorageManager
@@ -48,6 +51,8 @@ class MainActivity : ComponentActivity() {
 
     private var mediaStatsState: MutableState<MediaStats>? = null
     private var usbState: MutableState<UsbState>? = null
+    private var backupProgressState: MutableState<BackupProgress>? = null
+    private var currentBackupManager: BackupManager? = null
 
     private val usbFolderLauncher =
         registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
@@ -66,6 +71,8 @@ class MainActivity : ComponentActivity() {
                     name = "Seleccionada",
                     folder = "USB_Backup"
                 )
+
+                Toast.makeText(this, "USB seleccionada correctamente", Toast.LENGTH_LONG).show()
             }
         }
 
@@ -81,10 +88,8 @@ class MainActivity : ComponentActivity() {
 
                 loadMediaStats()
             } else {
-                mediaStatsState?.value = MediaStats(
-                    permissionGranted = false,
-                    loading = false
-                )
+                mediaStatsState?.value = MediaStats(permissionGranted = false, loading = false)
+                Toast.makeText(this, "Permiso de fotos/videos denegado", Toast.LENGTH_LONG).show()
             }
         }
 
@@ -94,16 +99,15 @@ class MainActivity : ComponentActivity() {
         setContent {
             val stats = remember { mutableStateOf(MediaStats()) }
             val usb = remember { mutableStateOf(loadUsbState()) }
+            val progress = remember { mutableStateOf(BackupProgress()) }
 
             mediaStatsState = stats
             usbState = usb
+            backupProgressState = progress
 
             LaunchedEffect(Unit) {
                 if (hasMediaPermission()) {
-                    stats.value = stats.value.copy(
-                        loading = true,
-                        permissionGranted = true
-                    )
+                    stats.value = stats.value.copy(loading = true, permissionGranted = true)
                     loadMediaStats()
                 }
             }
@@ -111,12 +115,10 @@ class MainActivity : ComponentActivity() {
             USBBackupApp(
                 stats = stats.value,
                 usbState = usb.value,
+                progress = progress.value,
                 onScanClick = {
                     if (hasMediaPermission()) {
-                        stats.value = stats.value.copy(
-                            loading = true,
-                            permissionGranted = true
-                        )
+                        stats.value = stats.value.copy(loading = true, permissionGranted = true)
                         loadMediaStats()
                     } else {
                         requestMediaPermission()
@@ -125,8 +127,12 @@ class MainActivity : ComponentActivity() {
                 onSelectUsbClick = {
                     usbFolderLauncher.launch(null)
                 },
-                onBackupClick = {
-                    backupFirstPhoto()
+                onBackupButtonClick = {
+                    if (progress.value.running) {
+                        cancelBackup()
+                    } else {
+                        backupAllPhotos()
+                    }
                 }
             )
         }
@@ -135,11 +141,7 @@ class MainActivity : ComponentActivity() {
     private fun loadUsbState(): UsbState {
         val manager = UsbStorageManager(this)
         return if (manager.hasUsbSelected()) {
-            UsbState(
-                selected = true,
-                name = "Seleccionada",
-                folder = "USB_Backup"
-            )
+            UsbState(true, "Seleccionada", "USB_Backup")
         } else {
             UsbState()
         }
@@ -147,19 +149,10 @@ class MainActivity : ComponentActivity() {
 
     private fun hasMediaPermission(): Boolean {
         return if (Build.VERSION.SDK_INT >= 33) {
-            ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.READ_MEDIA_IMAGES
-            ) == PackageManager.PERMISSION_GRANTED ||
-                    ContextCompat.checkSelfPermission(
-                        this,
-                        Manifest.permission.READ_MEDIA_VIDEO
-                    ) == PackageManager.PERMISSION_GRANTED
+            ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED ||
+                    ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_VIDEO) == PackageManager.PERMISSION_GRANTED
         } else {
-            ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.READ_EXTERNAL_STORAGE
-            ) == PackageManager.PERMISSION_GRANTED
+            ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
         }
     }
 
@@ -172,9 +165,7 @@ class MainActivity : ComponentActivity() {
                 )
             )
         } else {
-            permissionLauncher.launch(
-                arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
-            )
+            permissionLauncher.launch(arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE))
         }
     }
 
@@ -186,47 +177,89 @@ class MainActivity : ComponentActivity() {
                 MediaScanner(contentResolver).scanMedia()
             }
 
-            state.value = stats.copy(
-                loading = false,
-                permissionGranted = true
-            )
+            state.value = stats.copy(loading = false, permissionGranted = true)
         }
     }
 
-    private fun backupFirstPhoto() {
-        MainScope().launch {
-            val scanner = MediaScanner(contentResolver)
+    private fun cancelBackup() {
+        currentBackupManager?.cancel()
 
-            val photo = withContext(Dispatchers.IO) {
-                scanner.getFirstPhoto()
+        val progressState = backupProgressState ?: return
+        progressState.value = progressState.value.copy(
+            cancelling = true,
+            message = "Cancelando...",
+            logs = (progressState.value.logs + BackupLogLine("^C Cancelación solicitada", LogType.WARNING)).takeLast(8)
+        )
+    }
+
+    private fun backupAllPhotos() {
+        val progressState = backupProgressState ?: return
+
+        if (!hasMediaPermission()) {
+            requestMediaPermission()
+            return
+        }
+
+        val usbManager = UsbStorageManager(this)
+        if (!usbManager.hasUsbSelected()) {
+            Toast.makeText(this, "Primero selecciona la memoria USB", Toast.LENGTH_LONG).show()
+            return
+        }
+
+        if (progressState.value.running) {
+            cancelBackup()
+            return
+        }
+
+        MainScope().launch {
+            progressState.value = BackupProgress(
+                running = true,
+                message = "Pre-check",
+                currentFile = "---",
+                logs = listOf(
+                    BackupLogLine("$ Iniciando pre-check..."),
+                    BackupLogLine("$ Verificando permisos..."),
+                    BackupLogLine("✔ Permisos OK", LogType.OK),
+                    BackupLogLine("$ Detectando USB..."),
+                    BackupLogLine("✔ USB seleccionada", LogType.OK)
+                )
+            )
+
+            val photos = withContext(Dispatchers.IO) {
+                MediaScanner(contentResolver).getAllPhotos()
             }
 
-            if (photo == null) {
-                Toast.makeText(
-                    this@MainActivity,
-                    "No se encontraron fotos",
-                    Toast.LENGTH_LONG
-                ).show()
+            if (photos.isEmpty()) {
+                progressState.value = BackupProgress(
+                    running = false,
+                    message = "No se encontraron fotos",
+                    logs = listOf(
+                        BackupLogLine("$ Escaneando biblioteca..."),
+                        BackupLogLine("✖ No se encontraron fotos", LogType.ERROR)
+                    )
+                )
                 return@launch
             }
 
-            val ok = withContext(Dispatchers.IO) {
-                BackupManager(this@MainActivity).copyOneFileToUsb(photo)
+            val backupManager = BackupManager(this@MainActivity)
+            currentBackupManager = backupManager
+
+            val result = withContext(Dispatchers.IO) {
+                backupManager.copyPhotosToUsb(photos) { progress ->
+                    MainScope().launch {
+                        progressState.value = progress
+                    }
+                }
             }
 
-            if (ok) {
-                Toast.makeText(
-                    this@MainActivity,
-                    "Primer archivo copiado correctamente",
-                    Toast.LENGTH_LONG
-                ).show()
-            } else {
-                Toast.makeText(
-                    this@MainActivity,
-                    "Error copiando archivo",
-                    Toast.LENGTH_LONG
-                ).show()
-            }
+            currentBackupManager = null
+            progressState.value = result
+
+            Toast.makeText(
+                this@MainActivity,
+                "${result.message}: ${result.copied} copiadas, ${result.failed} fallidas",
+                Toast.LENGTH_LONG
+            ).show()
         }
     }
 }
@@ -235,22 +268,27 @@ class MainActivity : ComponentActivity() {
 fun USBBackupApp(
     stats: MediaStats,
     usbState: UsbState,
+    progress: BackupProgress,
     onScanClick: () -> Unit,
     onSelectUsbClick: () -> Unit,
-    onBackupClick: () -> Unit
+    onBackupButtonClick: () -> Unit
 ) {
-    Surface(
-        modifier = Modifier.fillMaxSize(),
-        color = TerminalBlack
-    ) {
+    Surface(modifier = Modifier.fillMaxSize(), color = TerminalBlack) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(start = 18.dp, end = 18.dp, top = 44.dp, bottom = 16.dp)
         ) {
-            Header(status = if (usbState.selected) "USB READY" else "IDLE")
+            Header(
+                status = when {
+                    progress.cancelling -> "CANCEL"
+                    progress.running -> "BACKUP"
+                    usbState.selected -> "USB READY"
+                    else -> "IDLE"
+                }
+            )
 
-            Spacer(modifier = Modifier.height(22.dp))
+            Spacer(modifier = Modifier.height(18.dp))
 
             TerminalBox("> ESTADO") {
                 StatusLine("Sistema", "OK")
@@ -259,24 +297,45 @@ fun USBBackupApp(
                 StatusLine("Fotos", if (stats.loading) "Buscando..." else stats.photos.toString())
                 StatusLine("Videos", if (stats.loading) "Buscando..." else stats.videos.toString())
                 StatusLine("Espacio", if (stats.loading) "Calculando..." else formatBytes(stats.totalBytes))
-                StatusLine("Modo", "Manual")
+                StatusLine("Modo", if (progress.running) "Respaldo" else "Manual")
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(12.dp))
+
+            TerminalBox("> TERMINAL") {
+                ShellLog(progress.logs)
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            TerminalBox("> RESPALDO") {
+                StatusLine("Estado", progress.message)
+                StatusLine("Total", progress.total.toString())
+                StatusLine("Copiadas", progress.copied.toString())
+                StatusLine("Fallidas", progress.failed.toString())
+                StatusLine("Archivo", shortenFileName(progress.currentFile))
+                ProgressBar(progress.copied, progress.total)
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
 
             TerminalBox("> ACCIONES") {
-                TerminalButton("[ ESCANEAR ]", onClick = onScanClick)
-                Spacer(modifier = Modifier.height(9.dp))
+                TerminalButton("[ ESCANEAR ]", onClick = onScanClick, enabled = !progress.running)
+                Spacer(modifier = Modifier.height(8.dp))
                 TerminalButton(
                     text = if (usbState.selected) "[ CAMBIAR USB ]" else "[ SELECCIONAR USB ]",
-                    onClick = onSelectUsbClick
+                    onClick = onSelectUsbClick,
+                    enabled = !progress.running
                 )
-                Spacer(modifier = Modifier.height(9.dp))
-                TerminalButton("[ RESPALDAR ]", onClick = onBackupClick)
+                Spacer(modifier = Modifier.height(8.dp))
+                TerminalButton(
+                    text = if (progress.running) "[ CANCELAR ]" else "[ RESPALDAR FOTOS ]",
+                    onClick = onBackupButtonClick,
+                    enabled = true
+                )
             }
 
-            Spacer(modifier = Modifier.height(18.dp))
-
+            Spacer(modifier = Modifier.height(14.dp))
             Footer()
         }
     }
@@ -291,20 +350,18 @@ fun Header(status: String) {
     ) {
         Column {
             Text(
-                text = "> USB Backup v0.0.7",
+                text = "> USB Backup v0.0.9",
                 color = TerminalGreen,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.Bold,
                 fontFamily = FontFamily.Monospace
             )
-
             Text(
                 text = "Android USB Backup Utility",
                 color = TerminalGreen,
                 fontSize = 10.sp,
                 fontFamily = FontFamily.Monospace
             )
-
             Text(
                 text = "-------------------------",
                 color = TerminalGreen,
@@ -324,20 +381,41 @@ fun Header(status: String) {
 }
 
 @Composable
+fun ShellLog(logs: List<BackupLogLine>) {
+    val visibleLogs = if (logs.isEmpty()) {
+        listOf(BackupLogLine("$ Esperando comando..."))
+    } else {
+        logs.takeLast(5)
+    }
+
+    Column {
+        visibleLogs.forEach { line ->
+            Text(
+                text = line.text,
+                color = when (line.type) {
+                    LogType.ERROR -> Color(0xFFFF5555)
+                    LogType.WARNING -> Color(0xFFFFC857)
+                    else -> TerminalGreen
+                },
+                fontSize = 9.sp,
+                fontFamily = FontFamily.Monospace
+            )
+        }
+
+        Text(
+            text = "READY_",
+            color = TerminalGreen,
+            fontSize = 10.sp,
+            fontFamily = FontFamily.Monospace
+        )
+    }
+}
+
+@Composable
 fun Footer() {
     Column {
-        Text(
-            text = "Backup Test",
-            color = TerminalGreen,
-            fontSize = 9.sp,
-            fontFamily = FontFamily.Monospace
-        )
-        Text(
-            text = "Build 0007 · Open Source",
-            color = TerminalGreen,
-            fontSize = 9.sp,
-            fontFamily = FontFamily.Monospace
-        )
+        Text("Live Terminal", color = TerminalGreen, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
+        Text("Build 0009 · Open Source", color = TerminalGreen, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
     }
 }
 
@@ -350,7 +428,7 @@ fun TerminalBox(
         modifier = Modifier
             .fillMaxWidth()
             .border(0.7.dp, TerminalGreen, RoundedCornerShape(3.dp))
-            .padding(14.dp)
+            .padding(12.dp)
     ) {
         Text(
             text = title,
@@ -360,8 +438,7 @@ fun TerminalBox(
             fontFamily = FontFamily.Monospace
         )
 
-        Spacer(modifier = Modifier.height(12.dp))
-
+        Spacer(modifier = Modifier.height(10.dp))
         content()
     }
 }
@@ -371,34 +448,55 @@ fun StatusLine(label: String, value: String) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 3.dp)
+            .padding(vertical = 2.dp)
     ) {
         Text(
             text = label.padEnd(18, '.'),
             color = TerminalGreen,
-            fontSize = 11.sp,
+            fontSize = 10.sp,
             fontFamily = FontFamily.Monospace
         )
 
         Text(
             text = " $value",
             color = TerminalGreen,
-            fontSize = 11.sp,
+            fontSize = 10.sp,
             fontFamily = FontFamily.Monospace
         )
     }
 }
 
 @Composable
+fun ProgressBar(copied: Int, total: Int) {
+    val blocks = 18
+    val filled = if (total <= 0) 0 else ((copied.toFloat() / total.toFloat()) * blocks).toInt()
+    val safeFilled = filled.coerceIn(0, blocks)
+
+    val bar = "█".repeat(safeFilled) + "░".repeat(blocks - safeFilled)
+    val percent = if (total <= 0) 0 else ((copied.toFloat() / total.toFloat()) * 100).toInt()
+
+    Spacer(modifier = Modifier.height(6.dp))
+
+    Text(
+        text = "$bar $percent%",
+        color = TerminalGreen,
+        fontSize = 10.sp,
+        fontFamily = FontFamily.Monospace
+    )
+}
+
+@Composable
 fun TerminalButton(
     text: String,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    enabled: Boolean = true
 ) {
     TextButton(
         onClick = onClick,
+        enabled = enabled,
         modifier = Modifier
             .fillMaxWidth()
-            .height(38.dp)
+            .height(36.dp)
             .border(
                 BorderStroke(0.8.dp, TerminalGreen),
                 RoundedCornerShape(3.dp)
@@ -407,10 +505,15 @@ fun TerminalButton(
     ) {
         Text(
             text = text,
-            color = TerminalGreen,
-            fontSize = 11.sp,
+            color = if (enabled) TerminalGreen else Color(0xFF1F661F),
+            fontSize = 10.sp,
             fontWeight = FontWeight.Bold,
             fontFamily = FontFamily.Monospace
         )
     }
+}
+
+fun shortenFileName(name: String): String {
+    if (name.length <= 22) return name
+    return name.take(9) + "..." + name.takeLast(10)
 }
