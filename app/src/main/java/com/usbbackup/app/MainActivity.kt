@@ -1,6 +1,7 @@
 package com.usbbackup.app
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -25,6 +26,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.usbbackup.app.media.MediaScanner
 import com.usbbackup.app.media.MediaStats
+import com.usbbackup.app.usb.UsbStorageManager
 import com.usbbackup.app.utils.formatBytes
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.MainScope
@@ -34,9 +36,36 @@ import kotlinx.coroutines.withContext
 val TerminalGreen = Color(0xFF39FF2F)
 val TerminalBlack = Color(0xFF020402)
 
+data class UsbState(
+    val selected: Boolean = false,
+    val name: String = "Esperando",
+    val folder: String = "---"
+)
+
 class MainActivity : ComponentActivity() {
 
     private var mediaStatsState: MutableState<MediaStats>? = null
+    private var usbState: MutableState<UsbState>? = null
+
+    private val usbFolderLauncher =
+        registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+            if (uri != null) {
+                val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+
+                contentResolver.takePersistableUriPermission(uri, flags)
+
+                val manager = UsbStorageManager(this)
+                manager.saveUsbUri(uri)
+                manager.createBackupFolder()
+
+                usbState?.value = UsbState(
+                    selected = true,
+                    name = "Seleccionada",
+                    folder = "USB_Backup"
+                )
+            }
+        }
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
@@ -62,7 +91,10 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             val stats = remember { mutableStateOf(MediaStats()) }
+            val usb = remember { mutableStateOf(loadUsbState()) }
+
             mediaStatsState = stats
+            usbState = usb
 
             LaunchedEffect(Unit) {
                 if (hasMediaPermission()) {
@@ -76,6 +108,7 @@ class MainActivity : ComponentActivity() {
 
             USBBackupApp(
                 stats = stats.value,
+                usbState = usb.value,
                 onScanClick = {
                     if (hasMediaPermission()) {
                         stats.value = stats.value.copy(
@@ -86,8 +119,24 @@ class MainActivity : ComponentActivity() {
                     } else {
                         requestMediaPermission()
                     }
+                },
+                onSelectUsbClick = {
+                    usbFolderLauncher.launch(null)
                 }
             )
+        }
+    }
+
+    private fun loadUsbState(): UsbState {
+        val manager = UsbStorageManager(this)
+        return if (manager.hasUsbSelected()) {
+            UsbState(
+                selected = true,
+                name = "Seleccionada",
+                folder = "USB_Backup"
+            )
+        } else {
+            UsbState()
         }
     }
 
@@ -143,7 +192,9 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun USBBackupApp(
     stats: MediaStats,
-    onScanClick: () -> Unit
+    usbState: UsbState,
+    onScanClick: () -> Unit,
+    onSelectUsbClick: () -> Unit
 ) {
     Surface(
         modifier = Modifier.fillMaxSize(),
@@ -154,13 +205,14 @@ fun USBBackupApp(
                 .fillMaxSize()
                 .padding(start = 18.dp, end = 18.dp, top = 44.dp, bottom = 16.dp)
         ) {
-            Header(status = if (stats.loading) "SCAN" else "IDLE")
+            Header(status = if (usbState.selected) "USB READY" else "IDLE")
 
             Spacer(modifier = Modifier.height(22.dp))
 
             TerminalBox("> ESTADO") {
                 StatusLine("Sistema", "OK")
-                StatusLine("USB", "Esperando")
+                StatusLine("USB", usbState.name)
+                StatusLine("Carpeta", usbState.folder)
                 StatusLine("Fotos", if (stats.loading) "Buscando..." else stats.photos.toString())
                 StatusLine("Videos", if (stats.loading) "Buscando..." else stats.videos.toString())
                 StatusLine("Espacio", if (stats.loading) "Calculando..." else formatBytes(stats.totalBytes))
@@ -172,9 +224,12 @@ fun USBBackupApp(
             TerminalBox("> ACCIONES") {
                 TerminalButton("[ ESCANEAR ]", onClick = onScanClick)
                 Spacer(modifier = Modifier.height(9.dp))
-                TerminalButton("[ RESPALDAR ]", onClick = {})
+                TerminalButton(
+                    text = if (usbState.selected) "[ CAMBIAR USB ]" else "[ SELECCIONAR USB ]",
+                    onClick = onSelectUsbClick
+                )
                 Spacer(modifier = Modifier.height(9.dp))
-                TerminalButton("[ ARCHIVOS ]", onClick = {})
+                TerminalButton("[ RESPALDAR ]", onClick = {})
             }
 
             Spacer(modifier = Modifier.height(18.dp))
@@ -193,7 +248,7 @@ fun Header(status: String) {
     ) {
         Column {
             Text(
-                text = "> USB Backup v0.0.5",
+                text = "> USB Backup v0.0.6",
                 color = TerminalGreen,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.Bold,
@@ -229,13 +284,13 @@ fun Header(status: String) {
 fun Footer() {
     Column {
         Text(
-            text = "Structure",
+            text = "SAF Storage",
             color = TerminalGreen,
             fontSize = 9.sp,
             fontFamily = FontFamily.Monospace
         )
         Text(
-            text = "Build 0005 · Open Source",
+            text = "Build 0006 · Open Source",
             color = TerminalGreen,
             fontSize = 9.sp,
             fontFamily = FontFamily.Monospace
