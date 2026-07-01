@@ -1,12 +1,9 @@
 package com.usbbackup.app
 
-
 import android.Manifest
-import android.content.ContentUris
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
-import android.provider.MediaStore
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -26,43 +23,30 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import com.usbbackup.app.media.MediaScanner
+import com.usbbackup.app.media.MediaStats
+import com.usbbackup.app.utils.formatBytes
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-
 val TerminalGreen = Color(0xFF39FF2F)
 val TerminalBlack = Color(0xFF020402)
 
-
-data class MediaStats(
-    val photos: Int = 0,
-    val videos: Int = 0,
-    val totalBytes: Long = 0L,
-    val loading: Boolean = false,
-    val permissionGranted: Boolean = false
-)
-
-
 class MainActivity : ComponentActivity() {
 
-
     private var mediaStatsState: MutableState<MediaStats>? = null
-
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
             val granted = permissions.values.any { it }
-
 
             if (granted) {
                 mediaStatsState?.value = mediaStatsState?.value?.copy(
                     loading = true,
                     permissionGranted = true
                 ) ?: MediaStats(loading = true, permissionGranted = true)
-
 
                 loadMediaStats()
             } else {
@@ -73,15 +57,12 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
 
         setContent {
             val stats = remember { mutableStateOf(MediaStats()) }
             mediaStatsState = stats
-
 
             LaunchedEffect(Unit) {
                 if (hasMediaPermission()) {
@@ -92,7 +73,6 @@ class MainActivity : ComponentActivity() {
                     loadMediaStats()
                 }
             }
-
 
             USBBackupApp(
                 stats = stats.value,
@@ -110,7 +90,6 @@ class MainActivity : ComponentActivity() {
             )
         }
     }
-
 
     private fun hasMediaPermission(): Boolean {
         return if (Build.VERSION.SDK_INT >= 33) {
@@ -130,7 +109,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-
     private fun requestMediaPermission() {
         if (Build.VERSION.SDK_INT >= 33) {
             permissionLauncher.launch(
@@ -146,16 +124,13 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-
     private fun loadMediaStats() {
         val state = mediaStatsState ?: return
 
-
-        kotlinx.coroutines.MainScope().launch {
+        MainScope().launch {
             val stats = withContext(Dispatchers.IO) {
-                scanMedia()
+                MediaScanner(contentResolver).scanMedia()
             }
-
 
             state.value = stats.copy(
                 loading = false,
@@ -163,68 +138,7 @@ class MainActivity : ComponentActivity() {
             )
         }
     }
-
-
-    private fun scanMedia(): MediaStats {
-        var photos = 0
-        var videos = 0
-        var totalBytes = 0L
-
-
-        val projection = arrayOf(
-            MediaStore.Files.FileColumns._ID,
-            MediaStore.Files.FileColumns.MEDIA_TYPE,
-            MediaStore.Files.FileColumns.SIZE
-        )
-
-
-        val selection =
-            "${MediaStore.Files.FileColumns.MEDIA_TYPE}=? OR ${MediaStore.Files.FileColumns.MEDIA_TYPE}=?"
-
-
-        val selectionArgs = arrayOf(
-            MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE.toString(),
-            MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO.toString()
-        )
-
-
-        val uri = MediaStore.Files.getContentUri("external")
-
-
-        contentResolver.query(
-            uri,
-            projection,
-            selection,
-            selectionArgs,
-            null
-        )?.use { cursor ->
-            val typeColumn = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.MEDIA_TYPE)
-            val sizeColumn = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.SIZE)
-
-
-            while (cursor.moveToNext()) {
-                val type = cursor.getInt(typeColumn)
-                val size = cursor.getLong(sizeColumn)
-
-
-                if (type == MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE) photos++
-                if (type == MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO) videos++
-
-
-                if (size > 0) totalBytes += size
-            }
-        }
-
-
-        return MediaStats(
-            photos = photos,
-            videos = videos,
-            totalBytes = totalBytes,
-            permissionGranted = true
-        )
-    }
 }
-
 
 @Composable
 fun USBBackupApp(
@@ -242,9 +156,7 @@ fun USBBackupApp(
         ) {
             Header(status = if (stats.loading) "SCAN" else "IDLE")
 
-
             Spacer(modifier = Modifier.height(22.dp))
-
 
             TerminalBox("> ESTADO") {
                 StatusLine("Sistema", "OK")
@@ -255,9 +167,7 @@ fun USBBackupApp(
                 StatusLine("Modo", "Manual")
             }
 
-
             Spacer(modifier = Modifier.height(16.dp))
-
 
             TerminalBox("> ACCIONES") {
                 TerminalButton("[ ESCANEAR ]", onClick = onScanClick)
@@ -267,15 +177,12 @@ fun USBBackupApp(
                 TerminalButton("[ ARCHIVOS ]", onClick = {})
             }
 
-
             Spacer(modifier = Modifier.height(18.dp))
-
 
             Footer()
         }
     }
 }
-
 
 @Composable
 fun Header(status: String) {
@@ -286,13 +193,12 @@ fun Header(status: String) {
     ) {
         Column {
             Text(
-                text = "> USB Backup v0.0.4",
+                text = "> USB Backup v0.0.5",
                 color = TerminalGreen,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.Bold,
                 fontFamily = FontFamily.Monospace
             )
-
 
             Text(
                 text = "Android USB Backup Utility",
@@ -301,7 +207,6 @@ fun Header(status: String) {
                 fontFamily = FontFamily.Monospace
             )
 
-
             Text(
                 text = "-------------------------",
                 color = TerminalGreen,
@@ -309,7 +214,6 @@ fun Header(status: String) {
                 fontFamily = FontFamily.Monospace
             )
         }
-
 
         Text(
             text = status,
@@ -321,25 +225,23 @@ fun Header(status: String) {
     }
 }
 
-
 @Composable
 fun Footer() {
     Column {
         Text(
-            text = "Scanner",
+            text = "Structure",
             color = TerminalGreen,
             fontSize = 9.sp,
             fontFamily = FontFamily.Monospace
         )
         Text(
-            text = "Build 0004 · Open Source",
+            text = "Build 0005 · Open Source",
             color = TerminalGreen,
             fontSize = 9.sp,
             fontFamily = FontFamily.Monospace
         )
     }
 }
-
 
 @Composable
 fun TerminalBox(
@@ -360,14 +262,11 @@ fun TerminalBox(
             fontFamily = FontFamily.Monospace
         )
 
-
         Spacer(modifier = Modifier.height(12.dp))
-
 
         content()
     }
 }
-
 
 @Composable
 fun StatusLine(label: String, value: String) {
@@ -383,7 +282,6 @@ fun StatusLine(label: String, value: String) {
             fontFamily = FontFamily.Monospace
         )
 
-
         Text(
             text = " $value",
             color = TerminalGreen,
@@ -392,7 +290,6 @@ fun StatusLine(label: String, value: String) {
         )
     }
 }
-
 
 @Composable
 fun TerminalButton(
@@ -417,23 +314,5 @@ fun TerminalButton(
             fontWeight = FontWeight.Bold,
             fontFamily = FontFamily.Monospace
         )
-    }
-}
-
-
-fun formatBytes(bytes: Long): String {
-    if (bytes <= 0L) return "---"
-
-
-    val kb = bytes / 1024.0
-    val mb = kb / 1024.0
-    val gb = mb / 1024.0
-
-
-    return when {
-        gb >= 1 -> "%.2f GB".format(gb)
-        mb >= 1 -> "%.2f MB".format(mb)
-        kb >= 1 -> "%.2f KB".format(kb)
-        else -> "$bytes B"
     }
 }
