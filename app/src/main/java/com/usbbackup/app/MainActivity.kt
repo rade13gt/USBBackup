@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -24,6 +25,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import com.usbbackup.app.backup.BackupManager
 import com.usbbackup.app.media.MediaScanner
 import com.usbbackup.app.media.MediaStats
 import com.usbbackup.app.usb.UsbStorageManager
@@ -122,6 +124,9 @@ class MainActivity : ComponentActivity() {
                 },
                 onSelectUsbClick = {
                     usbFolderLauncher.launch(null)
+                },
+                onBackupClick = {
+                    backupFirstPhoto()
                 }
             )
         }
@@ -187,6 +192,43 @@ class MainActivity : ComponentActivity() {
             )
         }
     }
+
+    private fun backupFirstPhoto() {
+        MainScope().launch {
+            val scanner = MediaScanner(contentResolver)
+
+            val photo = withContext(Dispatchers.IO) {
+                scanner.getFirstPhoto()
+            }
+
+            if (photo == null) {
+                Toast.makeText(
+                    this@MainActivity,
+                    "No se encontraron fotos",
+                    Toast.LENGTH_LONG
+                ).show()
+                return@launch
+            }
+
+            val ok = withContext(Dispatchers.IO) {
+                BackupManager(this@MainActivity).copyOneFileToUsb(photo)
+            }
+
+            if (ok) {
+                Toast.makeText(
+                    this@MainActivity,
+                    "Primer archivo copiado correctamente",
+                    Toast.LENGTH_LONG
+                ).show()
+            } else {
+                Toast.makeText(
+                    this@MainActivity,
+                    "Error copiando archivo",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }
+    }
 }
 
 @Composable
@@ -194,7 +236,8 @@ fun USBBackupApp(
     stats: MediaStats,
     usbState: UsbState,
     onScanClick: () -> Unit,
-    onSelectUsbClick: () -> Unit
+    onSelectUsbClick: () -> Unit,
+    onBackupClick: () -> Unit
 ) {
     Surface(
         modifier = Modifier.fillMaxSize(),
@@ -229,7 +272,7 @@ fun USBBackupApp(
                     onClick = onSelectUsbClick
                 )
                 Spacer(modifier = Modifier.height(9.dp))
-                TerminalButton("[ RESPALDAR ]", onClick = {})
+                TerminalButton("[ RESPALDAR ]", onClick = onBackupClick)
             }
 
             Spacer(modifier = Modifier.height(18.dp))
@@ -248,7 +291,7 @@ fun Header(status: String) {
     ) {
         Column {
             Text(
-                text = "> USB Backup v0.0.6",
+                text = "> USB Backup v0.0.7",
                 color = TerminalGreen,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.Bold,
@@ -284,13 +327,13 @@ fun Header(status: String) {
 fun Footer() {
     Column {
         Text(
-            text = "SAF Storage",
+            text = "Backup Test",
             color = TerminalGreen,
             fontSize = 9.sp,
             fontFamily = FontFamily.Monospace
         )
         Text(
-            text = "Build 0006 · Open Source",
+            text = "Build 0007 · Open Source",
             color = TerminalGreen,
             fontSize = 9.sp,
             fontFamily = FontFamily.Monospace
