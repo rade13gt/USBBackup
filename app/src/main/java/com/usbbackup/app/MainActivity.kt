@@ -9,6 +9,7 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.border
 import androidx.compose.foundation.rememberScrollState
@@ -45,7 +46,8 @@ data class UsbState(
     val selected: Boolean = false,
     val name: String = "Sin conexión",
     val folder: String = "---",
-    val availableSpace: Long = -1L
+    val availableSpace: Long = -1L,
+    val loading: Boolean = false
 )
 
 class MainActivity : ComponentActivity() {
@@ -64,11 +66,18 @@ class MainActivity : ComponentActivity() {
 
                 val manager = UsbStorageManager(this)
                 manager.saveUsbUri(uri)
-                manager.createBackupFolder()
 
-                usbState?.value = loadUsbState()
+                // Indicar carga inmediata para liberar la UI
+                usbState?.value = usbState?.value?.copy(loading = true, selected = true) ?: UsbState(loading = true, selected = true)
 
-                Toast.makeText(this, "USB seleccionada correctamente", Toast.LENGTH_LONG).show()
+                MainScope().launch {
+                    val newState = withContext(Dispatchers.IO) {
+                        manager.createBackupFolder()
+                        loadUsbState()
+                    }
+                    usbState?.value = newState.copy(loading = false)
+                    Toast.makeText(this@MainActivity, "USB seleccionada correctamente", Toast.LENGTH_LONG).show()
+                }
             }
         }
 
@@ -112,26 +121,30 @@ class MainActivity : ComponentActivity() {
                     stats.value = stats.value.copy(loading = true, permissionGranted = true)
                     loadMediaStats()
                 } else {
-                    // Even if no media permission, still try to load USB state
-                    usb.value = loadUsbState()
+                    val initialState = withContext(Dispatchers.IO) { loadUsbState() }
+                    usb.value = initialState
                 }
             }
 
             // Optional: Poll USB state while idle
             if (!progress.running) {
                 LaunchedEffect(Unit) {
-                    while(true) {
-                        kotlinx.coroutines.delay(3000)
-                        val currentUsb = loadUsbState()
-                        if (currentUsb != usb.value) {
-                            usb.value = currentUsb
-                            // If USB just connected/authorized, check space if we have stats
-                            if (currentUsb.selected && stats.value.totalBytes > 0) {
-                                if (currentUsb.availableSpace >= 0 && currentUsb.availableSpace < stats.value.totalBytes) {
-                                    BackupState.update(progress.copy(
-                                        message = "Espacio insuficiente",
-                                        logs = (progress.logs + BackupLogLine("USBBackup> ERROR: Insufficient space!", LogType.ERROR)).takeLast(50)
-                                    ))
+                    withContext(Dispatchers.IO) {
+                        while(true) {
+                            kotlinx.coroutines.delay(3000)
+                            val currentUsb = loadUsbState()
+                            if (currentUsb != usb.value) {
+                                withContext(Dispatchers.Main) {
+                                    usb.value = currentUsb
+                                    // If USB just connected/authorized, check space if we have stats
+                                    if (currentUsb.selected && stats.value.totalBytes > 0) {
+                                        if (currentUsb.availableSpace in 1..stats.value.totalBytes) {
+                                            BackupState.update(progress.copy(
+                                                message = "Espacio insuficiente",
+                                                logs = (progress.logs + BackupLogLine("USBBackup> ERROR: Insufficient space!", LogType.ERROR)).takeLast(50)
+                                            ))
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -224,11 +237,12 @@ class MainActivity : ComponentActivity() {
             state.value = stats.copy(loading = false, permissionGranted = true)
             
             // Auto-refresh USB state and check space
-            val newUsb = loadUsbState()
+            val newUsb = withContext(Dispatchers.IO) { loadUsbState() }
             usbState?.value = newUsb
             
             if (newUsb.selected && newUsb.availableSpace >= 0) {
-                if (newUsb.availableSpace < stats.totalBytes) {
+                val requiredBytes = stats.totalBytes
+                if (newUsb.availableSpace in 1..requiredBytes) {
                     BackupState.update(BackupState.progress.value.copy(
                         message = "Espacio insuficiente",
                         logs = (BackupState.progress.value.logs + BackupLogLine("USBBackup> ERROR: Insufficient space!", LogType.ERROR)).takeLast(50)
@@ -391,8 +405,14 @@ fun USBBackupApp(
                 Row(modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.weight(1.1f)) {
                         StatusLine("Sistema", "OK")
-                        StatusLine("USB", if (usbState.selected) usbState.name else "No detectada")
-                        StatusLine("Libre", if (usbState.selected && usbState.availableSpace >= 0) formatBytes(usbState.availableSpace) else "---")
+                        StatusLine(
+                            "USB", 
+                            if (usbState.loading) "Analizando..." else if (usbState.selected) usbState.name else "No detectada"
+                        )
+                        StatusLine(
+                            "Libre", 
+                            if (usbState.loading) "[...]" else if (usbState.selected && usbState.availableSpace >= 0) formatBytes(usbState.availableSpace) else "---"
+                        )
                     }
                     Column(modifier = Modifier.weight(1f)) {
                         StatusLine("Fotos", if (stats.loading) "..." else stats.photos.toString())
@@ -401,7 +421,11 @@ fun USBBackupApp(
                     }
                 }
                 Spacer(modifier = Modifier.height(2.dp))
-                StatusLine("Carpeta", usbState.folder, modifier = Modifier.fillMaxWidth())
+                StatusLine(
+                    "Carpeta", 
+                    if (usbState.loading) "Preparando SSD..." else usbState.folder, 
+                    modifier = Modifier.fillMaxWidth()
+                )
             }
 
             Spacer(modifier = Modifier.height(12.dp))
@@ -577,13 +601,40 @@ fun StatusLine(label: String, value: String, modifier: Modifier = Modifier) {
             fontFamily = FontFamily.Monospace
         )
 
-        Text(
-            text = " $value",
-            color = TerminalGreen,
-            fontSize = 10.sp,
-            fontFamily = FontFamily.Monospace,
-            maxLines = 1
-        )
+        if (value.contains("...") || value.contains("[...]")) {
+            val infiniteTransition = rememberInfiniteTransition(label = "spinner")
+            val frame by infiniteTransition.animateValue(
+                initialValue = 0,
+                targetValue = 4,
+                typeConverter = Int.VectorConverter,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(800, easing = LinearEasing),
+                    repeatMode = RepeatMode.Restart
+                ),
+                label = "frame"
+            )
+            val spinner = when (frame) {
+                0 -> "|"
+                1 -> "/"
+                2 -> "-"
+                else -> "\\"
+            }
+            Text(
+                text = " $value $spinner",
+                color = TerminalGreen,
+                fontSize = 10.sp,
+                fontFamily = FontFamily.Monospace,
+                maxLines = 1
+            )
+        } else {
+            Text(
+                text = " $value",
+                color = TerminalGreen,
+                fontSize = 10.sp,
+                fontFamily = FontFamily.Monospace,
+                maxLines = 1
+            )
+        }
     }
 }
 

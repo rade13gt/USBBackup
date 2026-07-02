@@ -6,6 +6,8 @@ import android.net.Uri
 import android.os.Build
 import android.os.storage.StorageManager
 import android.provider.DocumentsContract
+import android.os.StatFs
+import android.system.Os
 import androidx.documentfile.provider.DocumentFile
 
 class UsbStorageManager(private val context: Context) {
@@ -55,77 +57,96 @@ class UsbStorageManager(private val context: Context) {
 
     fun getUsbInfo(): UsbInfo? {
         val sm = context.getSystemService(Context.STORAGE_SERVICE) as StorageManager
-        val volumes = sm.storageVolumes
-        val uri = getUsbUri()
-
-        var matchedVolume: android.os.storage.StorageVolume? = null
-        var treeId: String? = null
-
-        if (uri != null) {
-            treeId = try {
-                DocumentsContract.getTreeDocumentId(uri)
-            } catch (_: Exception) {
-                null
-            }
-            if (treeId != null) {
-                val volumeId = treeId.substringBefore(":")
-                matchedVolume = volumes.firstOrNull { 
-                    val uuid = it.uuid
-                    uuid != null && uuid.equals(volumeId, ignoreCase = true) 
-                }
-            }
-        }
-
-        if (matchedVolume == null) {
-            matchedVolume = volumes.firstOrNull { it.isRemovable }
-        }
-
-        if (matchedVolume == null) return null
-
-        val usbName = matchedVolume.getDescription(context)
+        val volumes = sm.storageVolumes.filter { it.isRemovable && it.state == "mounted" }
         
-        // Try to get space via SAF if authorized
-        if (uri != null && treeId != null) {
+        if (volumes.isEmpty()) return null
+
+        val uri = getUsbUri()
+        val vol = volumes.first()
+        val usbName = vol.getDescription(context)
+        
+        var available: Long = -1L
+        var capacity: Long = -1L
+
+        val treeId = uri?.let { 
+            try { DocumentsContract.getTreeDocumentId(it) } catch (_: Exception) { null } 
+        }
+
+        // Strategy 1: Low-level File Descriptor (fstatvfs) - Most accurate for SAF
+        if (uri != null) {
             try {
-                val rootId = treeId.substringBefore(":")
-                val rootUri = DocumentsContract.buildRootUri(uri.authority!!, rootId)
+                // Ensure we use a direct document URI, not a tree URI for fstatvfs
+                val documentId = DocumentsContract.getTreeDocumentId(uri)
+                val documentUri = DocumentsContract.buildDocumentUriUsingTree(uri, documentId)
+                
+                context.contentResolver.openFileDescriptor(documentUri, "r")?.use { pfd ->
+                    val stats = Os.fstatvfs(pfd.fileDescriptor)
+                    // Use f_bavail (available to non-privileged users)
+                    available = stats.f_bavail * stats.f_frsize
+                    capacity = stats.f_blocks * stats.f_frsize
+                }
+            } catch (_: Exception) { }
+        }
 
-                context.contentResolver.query(
-                    rootUri,
-                    arrayOf(
-                        DocumentsContract.Root.COLUMN_AVAILABLE_BYTES,
-                        DocumentsContract.Root.COLUMN_CAPACITY_BYTES
-                    ),
-                    null,
-                    null,
-                    null
-                )?.use { cursor ->
-                    if (cursor.moveToFirst()) {
-                        val availableIndex = cursor.getColumnIndex(DocumentsContract.Root.COLUMN_AVAILABLE_BYTES)
-                        val capacityIndex = cursor.getColumnIndex(DocumentsContract.Root.COLUMN_CAPACITY_BYTES)
+        // Strategy 2: Direct Path via Volume ID (Fallback)
+        if (available <= 0L && treeId != null) {
+            val volumeId = treeId.substringBefore(":")
+            val possiblePath = "/storage/$volumeId"
+            val file = java.io.File(possiblePath)
+            if (file.exists() && file.canRead()) {
+                try {
+                    val stats = StatFs(file.absolutePath)
+                    available = stats.availableBytes
+                    capacity = stats.totalBytes
+                } catch (_: Exception) { }
+            }
+        }
 
-                        val available = if (availableIndex != -1 && !cursor.isNull(availableIndex)) cursor.getLong(availableIndex) else -1L
-                        val capacity = if (capacityIndex != -1 && !cursor.isNull(capacityIndex)) cursor.getLong(capacityIndex) else -1L
-
-                        if (available != -1L) {
-                            return UsbInfo(usbName, available, capacity, true)
-                        }
+        // Strategy 3: Use getExternalFilesDirs as fallback
+        if (available <= 0L) {
+            try {
+                val externalDirs = context.getExternalFilesDirs(null)
+                for (file in externalDirs) {
+                    if (file != null && android.os.Environment.isExternalStorageRemovable(file)) {
+                        val stats = StatFs(file.absolutePath)
+                        available = stats.availableBytes
+                        capacity = stats.totalBytes
+                        break
                     }
                 }
             } catch (_: Exception) { }
-
-            // Fallback for Android 11+ using the volume directory
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                val dir = matchedVolume.directory
-                if (dir != null) {
-                    return UsbInfo(usbName, dir.usableSpace, dir.totalSpace, true)
-                }
-            }
-
-            return UsbInfo(usbName, -1L, -1L, true)
         }
 
-        return UsbInfo(usbName, -1L, -1L, false)
+        // Strategy 4: SAF Roots query (last resort)
+        if (available <= 0L && uri != null) {
+            try {
+                val rootsUri = DocumentsContract.buildRootsUri(uri.authority!!)
+                context.contentResolver.query(
+                    rootsUri,
+                    arrayOf(
+                        DocumentsContract.Root.COLUMN_ROOT_ID,
+                        DocumentsContract.Root.COLUMN_AVAILABLE_BYTES,
+                        DocumentsContract.Root.COLUMN_CAPACITY_BYTES
+                    ),
+                    null, null, null
+                )?.use { cursor ->
+                    val idIdx = cursor.getColumnIndex(DocumentsContract.Root.COLUMN_ROOT_ID)
+                    val availIdx = cursor.getColumnIndex(DocumentsContract.Root.COLUMN_AVAILABLE_BYTES)
+                    val capIdx = cursor.getColumnIndex(DocumentsContract.Root.COLUMN_CAPACITY_BYTES)
+                    
+                    while (cursor.moveToNext()) {
+                        val rootId = if (idIdx != -1) cursor.getString(idIdx) else ""
+                        if (treeId != null && treeId.startsWith(rootId)) {
+                            available = if (availIdx != -1 && !cursor.isNull(availIdx)) cursor.getLong(availIdx) else -1L
+                            capacity = if (capIdx != -1 && !cursor.isNull(capIdx)) cursor.getLong(capIdx) else -1L
+                            break
+                        }
+                    }
+                }
+            } catch (_: Exception) {}
+        }
+
+        return UsbInfo(usbName, available, capacity, uri != null)
     }
 
     data class UsbInfo(

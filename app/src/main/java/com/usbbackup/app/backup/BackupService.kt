@@ -71,7 +71,10 @@ class BackupService : Service() {
             val requiredBytes = mediaItems.sumOf { it.size.coerceAtLeast(0L) }
             val availableBytes = usbManager.getAvailableSpaceBytes()
 
-            if (availableBytes >= 0 && availableBytes < requiredBytes) {
+            // Only block if we have a positive available space that is clearly too small.
+            // If it's 0 or -1, we assume a reading error and let the copy operation 
+            // handle the "disk full" error if it actually happens.
+            if (availableBytes in 1 until requiredBytes) {
                 BackupState.update(
                     BackupProgress(
                         running = false,
