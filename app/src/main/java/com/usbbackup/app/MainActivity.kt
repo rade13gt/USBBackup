@@ -1,10 +1,16 @@
 package com.usbbackup.app
 
 import android.Manifest
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -55,6 +61,18 @@ class MainActivity : ComponentActivity() {
     private var mediaStatsState: MutableState<MediaStats>? = null
     private var usbState: MutableState<UsbState>? = null
     private var currentBackupManager: BackupManager? = null
+
+    private val usbReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val manager = UsbStorageManager(this@MainActivity)
+            manager.clearCache()
+            
+            MainScope().launch {
+                val newState = withContext(Dispatchers.IO) { loadUsbState(forceRefresh = true) }
+                usbState?.value = newState
+            }
+        }
+    }
 
     private val usbFolderLauncher =
         registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
@@ -107,6 +125,22 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        // Register USB Receiver
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_DEVICE_STORAGE_LOW)
+            addAction(Intent.ACTION_DEVICE_STORAGE_OK)
+            addAction(Intent.ACTION_MEDIA_MOUNTED)
+            addAction(Intent.ACTION_MEDIA_UNMOUNTED)
+            addAction(Intent.ACTION_MEDIA_REMOVED)
+            addAction(Intent.ACTION_MEDIA_EJECT)
+            addDataScheme("file")
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(usbReceiver, filter, Context.RECEIVER_EXPORTED)
+        } else {
+            registerReceiver(usbReceiver, filter)
+        }
+
         setContent {
             val stats = remember { mutableStateOf(MediaStats()) }
             val usb = remember { mutableStateOf(loadUsbState()) }
@@ -123,32 +157,6 @@ class MainActivity : ComponentActivity() {
                 } else {
                     val initialState = withContext(Dispatchers.IO) { loadUsbState() }
                     usb.value = initialState
-                }
-            }
-
-            // Optional: Poll USB state while idle
-            if (!progress.running) {
-                LaunchedEffect(Unit) {
-                    withContext(Dispatchers.IO) {
-                        while(true) {
-                            kotlinx.coroutines.delay(3000)
-                            val currentUsb = loadUsbState()
-                            if (currentUsb != usb.value) {
-                                withContext(Dispatchers.Main) {
-                                    usb.value = currentUsb
-                                    // If USB just connected/authorized, check space if we have stats
-                                    if (currentUsb.selected && stats.value.totalBytes > 0) {
-                                        if (currentUsb.availableSpace in 1..stats.value.totalBytes) {
-                                            BackupState.update(progress.copy(
-                                                message = "Espacio insuficiente",
-                                                logs = (progress.logs + BackupLogLine("USBBackup> ERROR: Insufficient space!", LogType.ERROR)).takeLast(50)
-                                            ))
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
                 }
             }
 
@@ -189,9 +197,16 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun loadUsbState(): UsbState {
+    override fun onDestroy() {
+        super.onDestroy()
+        try {
+            unregisterReceiver(usbReceiver)
+        } catch (_: Exception) { }
+    }
+
+    private fun loadUsbState(forceRefresh: Boolean = false): UsbState {
         val manager = UsbStorageManager(this)
-        val info = manager.getUsbInfo()
+        val info = manager.getUsbInfo(forceRefresh)
         return if (info != null) {
             UsbState(
                 selected = info.isAuthorized,
@@ -205,15 +220,37 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun hasMediaPermission(): Boolean {
-        return if (Build.VERSION.SDK_INT >= 33) {
-            ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED ||
+        val hasGallery = if (Build.VERSION.SDK_INT >= 33) {
+            ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED &&
                     ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_VIDEO) == PackageManager.PERMISSION_GRANTED
         } else {
             ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
         }
+        
+        val hasAllFiles = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Environment.isExternalStorageManager()
+        } else {
+            true
+        }
+        
+        return hasGallery && hasAllFiles
     }
 
     private fun requestMediaPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !Environment.isExternalStorageManager()) {
+            try {
+                val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                    data = Uri.parse("package:$packageName")
+                }
+                startActivity(intent)
+                Toast.makeText(this, "Activa 'Permitir gestión de todos los archivos' para mayor velocidad", Toast.LENGTH_LONG).show()
+            } catch (e: Exception) {
+                val intent = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+                startActivity(intent)
+            }
+            return
+        }
+
         if (Build.VERSION.SDK_INT >= 33) {
             permissionLauncher.launch(
                 arrayOf(
