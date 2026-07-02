@@ -43,8 +43,9 @@ val TerminalBlack = Color(0xFF020402)
 
 data class UsbState(
     val selected: Boolean = false,
-    val name: String = "Esperando",
-    val folder: String = "---"
+    val name: String = "Sin conexión",
+    val folder: String = "---",
+    val availableSpace: Long = -1L
 )
 
 class MainActivity : ComponentActivity() {
@@ -65,11 +66,7 @@ class MainActivity : ComponentActivity() {
                 manager.saveUsbUri(uri)
                 manager.createBackupFolder()
 
-                usbState?.value = UsbState(
-                    selected = true,
-                    name = "Seleccionada",
-                    folder = "USB_Backup"
-                )
+                usbState?.value = loadUsbState()
 
                 Toast.makeText(this, "USB seleccionada correctamente", Toast.LENGTH_LONG).show()
             }
@@ -114,6 +111,31 @@ class MainActivity : ComponentActivity() {
                 if (hasMediaPermission()) {
                     stats.value = stats.value.copy(loading = true, permissionGranted = true)
                     loadMediaStats()
+                } else {
+                    // Even if no media permission, still try to load USB state
+                    usb.value = loadUsbState()
+                }
+            }
+
+            // Optional: Poll USB state while idle
+            if (!progress.running) {
+                LaunchedEffect(Unit) {
+                    while(true) {
+                        kotlinx.coroutines.delay(3000)
+                        val currentUsb = loadUsbState()
+                        if (currentUsb != usb.value) {
+                            usb.value = currentUsb
+                            // If USB just connected/authorized, check space if we have stats
+                            if (currentUsb.selected && stats.value.totalBytes > 0) {
+                                if (currentUsb.availableSpace >= 0 && currentUsb.availableSpace < stats.value.totalBytes) {
+                                    BackupState.update(progress.copy(
+                                        message = "Espacio insuficiente",
+                                        logs = (progress.logs + BackupLogLine("USBBackup> ERROR: Insufficient space!", LogType.ERROR)).takeLast(50)
+                                    ))
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -156,8 +178,14 @@ class MainActivity : ComponentActivity() {
 
     private fun loadUsbState(): UsbState {
         val manager = UsbStorageManager(this)
-        return if (manager.hasUsbSelected()) {
-            UsbState(true, "Seleccionada", "USB_Backup")
+        val info = manager.getUsbInfo()
+        return if (info != null) {
+            UsbState(
+                selected = info.isAuthorized,
+                name = info.name,
+                folder = if (info.isAuthorized) "USB_Backup" else "Requiere selección",
+                availableSpace = info.availableBytes
+            )
         } else {
             UsbState()
         }
@@ -194,6 +222,19 @@ class MainActivity : ComponentActivity() {
             }
 
             state.value = stats.copy(loading = false, permissionGranted = true)
+            
+            // Auto-refresh USB state and check space
+            val newUsb = loadUsbState()
+            usbState?.value = newUsb
+            
+            if (newUsb.selected && newUsb.availableSpace >= 0) {
+                if (newUsb.availableSpace < stats.totalBytes) {
+                    BackupState.update(BackupState.progress.value.copy(
+                        message = "Espacio insuficiente",
+                        logs = (BackupState.progress.value.logs + BackupLogLine("USBBackup> ERROR: Insufficient space!", LogType.ERROR)).takeLast(50)
+                    ))
+                }
+            }
         }
     }
 
@@ -339,20 +380,28 @@ fun USBBackupApp(
                     progress.running -> "BACKUP"
                     progress.message == "Respaldo finalizado" -> "COMPLETED"
                     usbState.selected -> "USB READY"
-                    else -> "IDLE"
+                    usbState.name != "Sin conexión" -> "USB CONNECTED"
+                    else -> "WAITING USB"
                 }
             )
 
             Spacer(modifier = Modifier.height(18.dp))
 
             TerminalBox("> ESTADO") {
-                StatusLine("Sistema", "OK")
-                StatusLine("USB", usbState.name)
-                StatusLine("Carpeta", usbState.folder)
-                StatusLine("Fotos", if (stats.loading) "Buscando..." else stats.photos.toString())
-                StatusLine("Videos", if (stats.loading) "Buscando..." else stats.videos.toString())
-                StatusLine("Espacio", if (stats.loading) "Calculando..." else formatBytes(stats.totalBytes))
-                StatusLine("Modo", if (progress.running) "Respaldo" else "Manual")
+                Row(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.weight(1.1f)) {
+                        StatusLine("Sistema", "OK")
+                        StatusLine("USB", if (usbState.selected) usbState.name else "No detectada")
+                        StatusLine("Libre", if (usbState.selected && usbState.availableSpace >= 0) formatBytes(usbState.availableSpace) else "---")
+                    }
+                    Column(modifier = Modifier.weight(1f)) {
+                        StatusLine("Fotos", if (stats.loading) "..." else stats.photos.toString())
+                        StatusLine("Videos", if (stats.loading) "..." else stats.videos.toString())
+                        StatusLine("Espacio", if (stats.loading) "..." else formatBytes(stats.totalBytes))
+                    }
+                }
+                Spacer(modifier = Modifier.height(2.dp))
+                StatusLine("Carpeta", usbState.folder, modifier = Modifier.fillMaxWidth())
             }
 
             Spacer(modifier = Modifier.height(12.dp))
@@ -517,24 +566,23 @@ fun TerminalBox(
 }
 
 @Composable
-fun StatusLine(label: String, value: String) {
+fun StatusLine(label: String, value: String, modifier: Modifier = Modifier) {
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 2.dp)
+        modifier = modifier.padding(vertical = 1.dp)
     ) {
         Text(
-            text = label.padEnd(18, '.'),
+            text = label.padEnd(10, '.'),
             color = TerminalGreen,
-            fontSize = 11.sp,
+            fontSize = 10.sp,
             fontFamily = FontFamily.Monospace
         )
 
         Text(
             text = " $value",
             color = TerminalGreen,
-            fontSize = 11.sp,
-            fontFamily = FontFamily.Monospace
+            fontSize = 10.sp,
+            fontFamily = FontFamily.Monospace,
+            maxLines = 1
         )
     }
 }
