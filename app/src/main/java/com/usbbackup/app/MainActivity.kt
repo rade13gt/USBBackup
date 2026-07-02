@@ -11,6 +11,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.border
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Surface
@@ -25,14 +27,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
-import com.usbbackup.app.backup.BackupLogLine
-import com.usbbackup.app.backup.BackupManager
-import com.usbbackup.app.backup.BackupProgress
-import com.usbbackup.app.backup.LogType
+import com.usbbackup.app.backup.*
 import com.usbbackup.app.media.MediaScanner
 import com.usbbackup.app.media.MediaStats
 import com.usbbackup.app.usb.UsbStorageManager
 import com.usbbackup.app.utils.formatBytes
+import com.usbbackup.app.utils.shortenFileName
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.launch
@@ -51,7 +51,6 @@ class MainActivity : ComponentActivity() {
 
     private var mediaStatsState: MutableState<MediaStats>? = null
     private var usbState: MutableState<UsbState>? = null
-    private var backupProgressState: MutableState<BackupProgress>? = null
     private var currentBackupManager: BackupManager? = null
 
     private val usbFolderLauncher =
@@ -89,21 +88,26 @@ class MainActivity : ComponentActivity() {
                 loadMediaStats()
             } else {
                 mediaStatsState?.value = MediaStats(permissionGranted = false, loading = false)
-                Toast.makeText(this, "Permiso de fotos/videos denegado", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, "Permisos denegados", Toast.LENGTH_LONG).show()
             }
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        if (Build.VERSION.SDK_INT >= 33) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                permissionLauncher.launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS))
+            }
+        }
+
         setContent {
             val stats = remember { mutableStateOf(MediaStats()) }
             val usb = remember { mutableStateOf(loadUsbState()) }
-            val progress = remember { mutableStateOf(BackupProgress()) }
+            val progress by BackupState.progress
 
             mediaStatsState = stats
             usbState = usb
-            backupProgressState = progress
 
             LaunchedEffect(Unit) {
                 if (hasMediaPermission()) {
@@ -115,7 +119,7 @@ class MainActivity : ComponentActivity() {
             USBBackupApp(
                 stats = stats.value,
                 usbState = usb.value,
-                progress = progress.value,
+                progress = progress,
                 onScanClick = {
                     if (hasMediaPermission()) {
                         stats.value = stats.value.copy(loading = true, permissionGranted = true)
@@ -128,7 +132,7 @@ class MainActivity : ComponentActivity() {
                     usbFolderLauncher.launch(null)
                 },
                 onBackupButtonClick = {
-                    if (progress.value.running) {
+                    if (progress.running) {
                         cancelBackup()
                     } else {
                         backupAllPhotos()
@@ -182,19 +186,13 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun cancelBackup() {
-        currentBackupManager?.cancel()
-
-        val progressState = backupProgressState ?: return
-        progressState.value = progressState.value.copy(
-            cancelling = true,
-            message = "Cancelando...",
-            logs = (progressState.value.logs + BackupLogLine("^C Cancelación solicitada", LogType.WARNING)).takeLast(8)
-        )
+        val intent = Intent(this, BackupService::class.java).apply {
+            action = "STOP_BACKUP"
+        }
+        startService(intent)
     }
 
     private fun backupAllPhotos() {
-        val progressState = backupProgressState ?: return
-
         if (!hasMediaPermission()) {
             requestMediaPermission()
             return
@@ -206,60 +204,16 @@ class MainActivity : ComponentActivity() {
             return
         }
 
-        if (progressState.value.running) {
+        if (BackupState.progress.value.running) {
             cancelBackup()
             return
         }
 
-        MainScope().launch {
-            progressState.value = BackupProgress(
-                running = true,
-                message = "Pre-check",
-                currentFile = "---",
-                logs = listOf(
-                    BackupLogLine("$ Iniciando pre-check..."),
-                    BackupLogLine("$ Verificando permisos..."),
-                    BackupLogLine("✔ Permisos OK", LogType.OK),
-                    BackupLogLine("$ Detectando USB..."),
-                    BackupLogLine("✔ USB seleccionada", LogType.OK)
-                )
-            )
-
-            val photos = withContext(Dispatchers.IO) {
-                MediaScanner(contentResolver).getAllPhotos()
-            }
-
-            if (photos.isEmpty()) {
-                progressState.value = BackupProgress(
-                    running = false,
-                    message = "No se encontraron fotos",
-                    logs = listOf(
-                        BackupLogLine("$ Escaneando biblioteca..."),
-                        BackupLogLine("✖ No se encontraron fotos", LogType.ERROR)
-                    )
-                )
-                return@launch
-            }
-
-            val backupManager = BackupManager(this@MainActivity)
-            currentBackupManager = backupManager
-
-            val result = withContext(Dispatchers.IO) {
-                backupManager.copyPhotosToUsb(photos) { progress ->
-                    MainScope().launch {
-                        progressState.value = progress
-                    }
-                }
-            }
-
-            currentBackupManager = null
-            progressState.value = result
-
-            Toast.makeText(
-                this@MainActivity,
-                "${result.message}: ${result.copied} copiadas, ${result.failed} fallidas",
-                Toast.LENGTH_LONG
-            ).show()
+        val intent = Intent(this, BackupService::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
         }
     }
 }
@@ -283,6 +237,7 @@ fun USBBackupApp(
                 status = when {
                     progress.cancelling -> "CANCEL"
                     progress.running -> "BACKUP"
+                    progress.message == "Respaldo finalizado" -> "COMPLETED"
                     usbState.selected -> "USB READY"
                     else -> "IDLE"
                 }
@@ -313,6 +268,7 @@ fun USBBackupApp(
                 StatusLine("Total", progress.total.toString())
                 StatusLine("Copiadas", progress.copied.toString())
                 StatusLine("Fallidas", progress.failed.toString())
+                StatusLine("Tamaño", formatBytes(progress.totalSizeBytes))
                 StatusLine("Archivo", shortenFileName(progress.currentFile))
                 ProgressBar(progress.copied, progress.total)
             }
@@ -329,7 +285,7 @@ fun USBBackupApp(
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 TerminalButton(
-                    text = if (progress.running) "[ CANCELAR ]" else "[ RESPALDAR FOTOS ]",
+                    text = if (progress.running) "[ CANCELAR ]" else "[ RESPALDAR TODO ]",
                     onClick = onBackupButtonClick,
                     enabled = true
                 )
@@ -382,19 +338,31 @@ fun Header(status: String) {
 
 @Composable
 fun ShellLog(logs: List<BackupLogLine>) {
-    val visibleLogs = if (logs.isEmpty()) {
-        listOf(BackupLogLine("$ Esperando comando..."))
-    } else {
-        logs.takeLast(5)
+    val scrollState = rememberScrollState()
+    
+    // Auto-scroll to bottom when new logs arrive
+    LaunchedEffect(logs.size) {
+        scrollState.animateScrollTo(scrollState.maxValue)
     }
 
-    Column {
-        visibleLogs.forEach { line ->
+    val displayLogs = if (logs.isEmpty()) {
+        listOf(BackupLogLine("$ Esperando comando..."))
+    } else {
+        logs
+    }
+
+    Column(
+        modifier = Modifier
+            .height(80.dp)
+            .verticalScroll(scrollState)
+    ) {
+        displayLogs.forEach { line ->
             Text(
                 text = line.text,
                 color = when (line.type) {
                     LogType.ERROR -> Color(0xFFFF5555)
                     LogType.WARNING -> Color(0xFFFFC857)
+                    LogType.OK -> TerminalGreen
                     else -> TerminalGreen
                 },
                 fontSize = 9.sp,
@@ -402,12 +370,14 @@ fun ShellLog(logs: List<BackupLogLine>) {
             )
         }
 
-        Text(
-            text = "READY_",
-            color = TerminalGreen,
-            fontSize = 10.sp,
-            fontFamily = FontFamily.Monospace
-        )
+        if (displayLogs.lastOrNull()?.text != "READY_") {
+            Text(
+                text = "READY_",
+                color = TerminalGreen,
+                fontSize = 10.sp,
+                fontFamily = FontFamily.Monospace
+            )
+        }
     }
 }
 
@@ -511,9 +481,4 @@ fun TerminalButton(
             fontFamily = FontFamily.Monospace
         )
     }
-}
-
-fun shortenFileName(name: String): String {
-    if (name.length <= 22) return name
-    return name.take(9) + "..." + name.takeLast(10)
 }

@@ -57,6 +57,53 @@ class MediaScanner(
         return getAllPhotos().firstOrNull()
     }
 
+    fun getAllMedia(): List<MediaItem> {
+        val items = mutableListOf<MediaItem>()
+        
+        // Add Photos
+        items.addAll(getAllPhotos())
+        
+        // Add Videos
+        val videoUri = MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+        val projection = arrayOf(
+            MediaStore.Video.Media._ID,
+            MediaStore.Video.Media.DISPLAY_NAME,
+            MediaStore.Video.Media.MIME_TYPE,
+            MediaStore.Video.Media.SIZE
+        )
+
+        contentResolver.query(
+            videoUri,
+            projection,
+            null,
+            null,
+            "${MediaStore.Video.Media.DATE_ADDED} DESC"
+        )?.use { cursor ->
+            val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Video.Media._ID)
+            val nameColumn = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DISPLAY_NAME)
+            val mimeColumn = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.MIME_TYPE)
+            val sizeColumn = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.SIZE)
+
+            while (cursor.moveToNext()) {
+                val id = cursor.getLong(idColumn)
+                val name = cursor.getString(nameColumn) ?: "video_$id.mp4"
+                val mime = cursor.getString(mimeColumn) ?: "video/mp4"
+                val size = cursor.getLong(sizeColumn)
+
+                items.add(
+                    MediaItem(
+                        uri = ContentUris.withAppendedId(videoUri, id),
+                        name = name,
+                        mimeType = mime,
+                        size = size
+                    )
+                )
+            }
+        }
+
+        return items
+    }
+
     fun getAllPhotos(): List<MediaItem> {
         val photos = mutableListOf<MediaItem>()
         val uri = MediaStore.Images.Media.EXTERNAL_CONTENT_URI

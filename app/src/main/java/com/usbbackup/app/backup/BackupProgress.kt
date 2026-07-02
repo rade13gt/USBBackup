@@ -6,6 +6,7 @@ data class BackupProgress(
     val total: Int = 0,
     val copied: Int = 0,
     val failed: Int = 0,
+    val totalSizeBytes: Long = 0,
     val currentFile: String = "---",
     val message: String = "Listo",
     val logs: List<BackupLogLine> = emptyList()

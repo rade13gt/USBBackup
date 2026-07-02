@@ -3,6 +3,7 @@ package com.usbbackup.app.backup
 import android.content.Context
 import com.usbbackup.app.media.MediaItem
 import com.usbbackup.app.usb.UsbStorageManager
+import com.usbbackup.app.utils.formatBytes
 import androidx.documentfile.provider.DocumentFile
 
 class BackupManager(
@@ -25,7 +26,7 @@ class BackupManager(
         return copyFileToFolder(item, backupFolder)
     }
 
-    fun copyPhotosToUsb(
+    fun copyMediaToUsb(
         items: List<MediaItem>,
         onProgress: (BackupProgress) -> Unit
     ): BackupProgress {
@@ -38,7 +39,7 @@ class BackupManager(
 
         fun pushLog(text: String, type: LogType = LogType.INFO) {
             logs.add(BackupLogLine(text, type))
-            if (logs.size > 8) logs.removeAt(0)
+            if (logs.size > 50) logs.removeAt(0)
         }
 
         pushLog("$ Detectando almacenamiento...")
@@ -60,10 +61,11 @@ class BackupManager(
         pushLog("$ Creando carpeta USB_Backup...")
         pushLog("✔ Carpeta lista", LogType.OK)
         pushLog("$ Preparando respaldo...")
-        pushLog("✔ ${items.size} fotos encontradas", LogType.OK)
+        pushLog("✔ ${items.size} archivos encontrados", LogType.OK)
 
         var copied = 0
         var failed = 0
+        var totalCopiedSize = 0L
 
         onProgress(
             BackupProgress(
@@ -71,6 +73,7 @@ class BackupManager(
                 total = items.size,
                 copied = copied,
                 failed = failed,
+                totalSizeBytes = totalCopiedSize,
                 currentFile = "---",
                 message = "Iniciando respaldo",
                 logs = logs.toList()
@@ -88,25 +91,12 @@ class BackupManager(
                     total = items.size,
                     copied = copied,
                     failed = failed,
+                    totalSizeBytes = totalCopiedSize,
                     currentFile = "---",
                     message = "Cancelado por el usuario",
                     logs = logs.toList()
                 )
             }
-
-            pushLog("USBBackup> copy ${shortName(item.name)}")
-
-            onProgress(
-                BackupProgress(
-                    running = true,
-                    total = items.size,
-                    copied = copied,
-                    failed = failed,
-                    currentFile = item.name,
-                    message = "Copiando fotos",
-                    logs = logs.toList()
-                )
-            )
 
             val ok = try {
                 copyFileToFolder(item, backupFolder)
@@ -114,7 +104,14 @@ class BackupManager(
                 false
             }
 
-            if (ok) copied++ else failed++
+            if (ok) {
+                copied++
+                totalCopiedSize += item.size.coerceAtLeast(0)
+                pushLog("✔ ${shortName(item.name)}", LogType.OK)
+            } else {
+                failed++
+                pushLog("✖ ${shortName(item.name)}", LogType.ERROR)
+            }
 
             onProgress(
                 BackupProgress(
@@ -122,20 +119,24 @@ class BackupManager(
                     total = items.size,
                     copied = copied,
                     failed = failed,
+                    totalSizeBytes = totalCopiedSize,
                     currentFile = item.name,
-                    message = "Copiando fotos",
+                    message = "Copiando archivos",
                     logs = logs.toList()
                 )
             )
         }
 
         pushLog("✔ Respaldo finalizado", LogType.OK)
+        pushLog("✔ Total: $copied archivos", LogType.OK)
+        pushLog("✔ Tamaño: ${formatBytes(totalCopiedSize)}", LogType.OK)
 
         return BackupProgress(
             running = false,
             total = items.size,
             copied = copied,
             failed = failed,
+            totalSizeBytes = totalCopiedSize,
             currentFile = "---",
             message = "Respaldo finalizado",
             logs = logs.toList()

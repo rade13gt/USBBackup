@@ -14,3 +14,8 @@ fun formatBytes(bytes: Long): String {
         else -> "$bytes B"
     }
 }
+
+fun shortenFileName(name: String): String {
+    if (name.length <= 22) return name
+    return name.take(9) + "..." + name.takeLast(10)
+}

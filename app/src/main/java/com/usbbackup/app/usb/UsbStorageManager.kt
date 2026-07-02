@@ -3,6 +3,7 @@ package com.usbbackup.app.usb
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.provider.DocumentsContract
 import androidx.documentfile.provider.DocumentFile
 
 class UsbStorageManager(private val context: Context) {
@@ -26,9 +27,7 @@ class UsbStorageManager(private val context: Context) {
         return value?.let { Uri.parse(it) }
     }
 
-    fun hasUsbSelected(): Boolean {
-        return getUsbUri() != null
-    }
+    fun hasUsbSelected(): Boolean = getUsbUri() != null
 
     fun getUsbRoot(): DocumentFile? {
         val uri = getUsbUri() ?: return null
@@ -50,5 +49,33 @@ class UsbStorageManager(private val context: Context) {
 
         context.contentResolver.takePersistableUriPermission(uri, flags)
         saveUsbUri(uri)
+    }
+
+    fun getAvailableSpaceBytes(): Long {
+        val uri = getUsbUri() ?: return -1L
+
+        return try {
+            val treeId = DocumentsContract.getTreeDocumentId(uri)
+            val rootId = treeId.substringBefore(":")
+            val rootUri = DocumentsContract.buildRootUri(uri.authority!!, rootId)
+
+            context.contentResolver.query(
+                rootUri,
+                arrayOf(DocumentsContract.Root.COLUMN_AVAILABLE_BYTES),
+                null,
+                null,
+                null
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val index = cursor.getColumnIndex(DocumentsContract.Root.COLUMN_AVAILABLE_BYTES)
+                    if (index != -1 && !cursor.isNull(index)) {
+                        return cursor.getLong(index)
+                    }
+                }
+            }
+            -1L
+        } catch (_: Exception) {
+            -1L
+        }
     }
 }
