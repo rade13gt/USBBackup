@@ -8,6 +8,7 @@ data class BackupProgress(
     val failed: Int = 0,
     val totalSizeBytes: Long = 0,
     val currentFile: String = "---",
+    val currentFileProgress: Float = 0f, // 0.0 to 1.0
     val message: String = "Listo",
     val logs: List<BackupLogLine> = emptyList()
 )

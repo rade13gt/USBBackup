@@ -105,6 +105,7 @@ class MainActivity : ComponentActivity() {
             val stats = remember { mutableStateOf(MediaStats()) }
             val usb = remember { mutableStateOf(loadUsbState()) }
             val progress by BackupState.progress
+            var showCancelDialog by remember { mutableStateOf(false) }
 
             mediaStatsState = stats
             usbState = usb
@@ -114,6 +115,17 @@ class MainActivity : ComponentActivity() {
                     stats.value = stats.value.copy(loading = true, permissionGranted = true)
                     loadMediaStats()
                 }
+            }
+
+            if (showCancelDialog) {
+                ConfirmationDialog(
+                    progress = progress,
+                    onConfirm = {
+                        showCancelDialog = false
+                        cancelBackup()
+                    },
+                    onDismiss = { showCancelDialog = false }
+                )
             }
 
             USBBackupApp(
@@ -133,7 +145,7 @@ class MainActivity : ComponentActivity() {
                 },
                 onBackupButtonClick = {
                     if (progress.running) {
-                        cancelBackup()
+                        showCancelDialog = true
                     } else {
                         backupAllPhotos()
                     }
@@ -204,16 +216,104 @@ class MainActivity : ComponentActivity() {
             return
         }
 
-        if (BackupState.progress.value.running) {
-            cancelBackup()
-            return
-        }
-
         val intent = Intent(this, BackupService::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(intent)
         } else {
             startService(intent)
+        }
+    }
+}
+
+@Composable
+fun ConfirmationDialog(
+    progress: BackupProgress,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val remaining = (progress.total - progress.copied).coerceAtLeast(0)
+    
+    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            shape = RoundedCornerShape(4.dp),
+            color = TerminalBlack,
+            border = BorderStroke(1.dp, TerminalGreen)
+        ) {
+            Column(
+                modifier = Modifier.padding(20.dp),
+                horizontalAlignment = Alignment.Start
+            ) {
+                Text(
+                    text = "> ADVERTENCIA: INTERRUPCIÓN",
+                    color = Color(0xFFFF5555),
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace
+                )
+                
+                Spacer(modifier = Modifier.height(16.dp))
+                
+                Text(
+                    text = "El proceso de respaldo está activo.",
+                    color = TerminalGreen,
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace
+                )
+                
+                Spacer(modifier = Modifier.height(12.dp))
+                
+                StatusLine("Procesados", progress.copied.toString())
+                StatusLine("Pendientes", remaining.toString())
+                StatusLine("Total", progress.total.toString())
+                
+                Spacer(modifier = Modifier.height(16.dp))
+                
+                Text(
+                    text = "¿Confirmar cancelación anticipada?",
+                    color = TerminalGreen,
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace
+                )
+                
+                Spacer(modifier = Modifier.height(24.dp))
+                
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.End
+                ) {
+                    TextButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.height(32.dp),
+                        contentPadding = PaddingValues(0.dp)
+                    ) {
+                        Text(
+                            text = "[ NO / CONTINUAR ]",
+                            color = TerminalGreen,
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                    
+                    Spacer(modifier = Modifier.height(8.dp))
+                    
+                    TextButton(
+                        onClick = onConfirm,
+                        modifier = Modifier.height(32.dp),
+                        contentPadding = PaddingValues(0.dp)
+                    ) {
+                        Text(
+                            text = "[ SÍ / CANCELAR ]",
+                            color = Color(0xFFFF5555),
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -270,7 +370,10 @@ fun USBBackupApp(
                 StatusLine("Fallidas", progress.failed.toString())
                 StatusLine("Tamaño", formatBytes(progress.totalSizeBytes))
                 StatusLine("Archivo", shortenFileName(progress.currentFile))
-                ProgressBar(progress.copied, progress.total)
+                
+                Spacer(modifier = Modifier.height(8.dp))
+                ProgressBar("ARCHIVO", progress.currentFileProgress)
+                ProgressBar("TOTAL  ", if (progress.total > 0) progress.copied.toFloat() / progress.total.toFloat() else 0f)
             }
 
             Spacer(modifier = Modifier.height(12.dp))
@@ -423,36 +526,48 @@ fun StatusLine(label: String, value: String) {
         Text(
             text = label.padEnd(18, '.'),
             color = TerminalGreen,
-            fontSize = 10.sp,
+            fontSize = 11.sp,
             fontFamily = FontFamily.Monospace
         )
 
         Text(
             text = " $value",
             color = TerminalGreen,
-            fontSize = 10.sp,
+            fontSize = 11.sp,
             fontFamily = FontFamily.Monospace
         )
     }
 }
 
 @Composable
-fun ProgressBar(copied: Int, total: Int) {
+fun ProgressBar(label: String, progress: Float) {
     val blocks = 18
-    val filled = if (total <= 0) 0 else ((copied.toFloat() / total.toFloat()) * blocks).toInt()
+    val safeProgress = progress.coerceIn(0f, 1f)
+    val filled = (safeProgress * blocks).toInt()
     val safeFilled = filled.coerceIn(0, blocks)
 
     val bar = "█".repeat(safeFilled) + "░".repeat(blocks - safeFilled)
-    val percent = if (total <= 0) 0 else ((copied.toFloat() / total.toFloat()) * 100).toInt()
+    val percent = (safeProgress * 100).toInt()
 
-    Spacer(modifier = Modifier.height(6.dp))
-
-    Text(
-        text = "$bar $percent%",
-        color = TerminalGreen,
-        fontSize = 10.sp,
-        fontFamily = FontFamily.Monospace
-    )
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.padding(vertical = 2.dp)
+    ) {
+        Text(
+            text = label,
+            color = TerminalGreen,
+            fontSize = 9.sp,
+            fontFamily = FontFamily.Monospace,
+            modifier = Modifier.width(55.dp)
+        )
+        
+        Text(
+            text = "$bar $percent%",
+            color = TerminalGreen,
+            fontSize = 10.sp,
+            fontFamily = FontFamily.Monospace
+        )
+    }
 }
 
 @Composable

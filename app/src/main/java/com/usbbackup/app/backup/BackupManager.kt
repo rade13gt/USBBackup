@@ -20,10 +20,12 @@ class BackupManager(
         cancelled = false
     }
 
+    fun isCancelled(): Boolean = cancelled
+
     fun copyOneFileToUsb(item: MediaItem): Boolean {
         val usbManager = UsbStorageManager(context)
         val backupFolder = usbManager.createBackupFolder() ?: return false
-        return copyFileToFolder(item, backupFolder)
+        return copyFileWithProgress(item, backupFolder) { }
     }
 
     fun copyMediaToUsb(
@@ -75,6 +77,7 @@ class BackupManager(
                 failed = failed,
                 totalSizeBytes = totalCopiedSize,
                 currentFile = "---",
+                currentFileProgress = 0f,
                 message = "Iniciando respaldo",
                 logs = logs.toList()
             )
@@ -93,13 +96,28 @@ class BackupManager(
                     failed = failed,
                     totalSizeBytes = totalCopiedSize,
                     currentFile = "---",
+                    currentFileProgress = 0f,
                     message = "Cancelado por el usuario",
                     logs = logs.toList()
                 )
             }
 
             val ok = try {
-                copyFileToFolder(item, backupFolder)
+                copyFileWithProgress(item, backupFolder) { fileProgress ->
+                    onProgress(
+                        BackupProgress(
+                            running = true,
+                            total = items.size,
+                            copied = copied,
+                            failed = failed,
+                            totalSizeBytes = totalCopiedSize,
+                            currentFile = item.name,
+                            currentFileProgress = fileProgress,
+                            message = "Copiando archivos",
+                            logs = logs.toList()
+                        )
+                    )
+                }
             } catch (_: Exception) {
                 false
             }
@@ -121,6 +139,7 @@ class BackupManager(
                     failed = failed,
                     totalSizeBytes = totalCopiedSize,
                     currentFile = item.name,
+                    currentFileProgress = 1f,
                     message = "Copiando archivos",
                     logs = logs.toList()
                 )
@@ -138,29 +157,50 @@ class BackupManager(
             failed = failed,
             totalSizeBytes = totalCopiedSize,
             currentFile = "---",
+            currentFileProgress = 1f,
             message = "Respaldo finalizado",
             logs = logs.toList()
         )
     }
 
-    private fun copyFileToFolder(
+    private fun copyFileWithProgress(
         item: MediaItem,
-        folder: DocumentFile
+        folder: DocumentFile,
+        onFileProgress: (Float) -> Unit
     ): Boolean {
         val existing = folder.findFile(item.name)
-        if (existing != null) return true
+        if (existing != null) {
+            onFileProgress(1f)
+            return true
+        }
 
         val outputFile = folder.createFile(item.mimeType, item.name) ?: return false
 
-        context.contentResolver.openInputStream(item.uri).use { input ->
-            context.contentResolver.openOutputStream(outputFile.uri).use { output ->
-                if (input == null || output == null) return false
-                input.copyTo(output)
+        return try {
+            context.contentResolver.openInputStream(item.uri).use { input ->
+                context.contentResolver.openOutputStream(outputFile.uri).use { output ->
+                    if (input == null || output == null) return false
+                    
+                    val buffer = ByteArray(64 * 1024)
+                    var totalRead = 0L
+                    val fileSize = item.size.coerceAtLeast(1L)
+                    
+                    var bytesRead: Int
+                    while (input.read(buffer).also { bytesRead = it } != -1) {
+                        if (cancelled) return false
+                        output.write(buffer, 0, bytesRead)
+                        totalRead += bytesRead
+                        onFileProgress(totalRead.toFloat() / fileSize.toFloat())
+                    }
+                    true
+                }
             }
+        } catch (e: Exception) {
+            outputFile.delete()
+            false
         }
-
-        return true
     }
+
     private fun shortName(name: String): String {
         if (name.length <= 24) return name
 

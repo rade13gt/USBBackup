@@ -16,6 +16,7 @@ class BackupService : Service() {
 
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var backupJob: Job? = null
+    private var currentManager: BackupManager? = null
     private val CHANNEL_ID = "backup_service_channel"
     private val NOTIFICATION_ID = 1
 
@@ -88,6 +89,7 @@ class BackupService : Service() {
             }
 
             val manager = BackupManager(this@BackupService)
+            currentManager = manager
             val result = manager.copyMediaToUsb(mediaItems) { progress ->
                 BackupState.update(progress)
                 updateNotification(
@@ -95,6 +97,7 @@ class BackupService : Service() {
                 )
             }
             
+            currentManager = null
             BackupState.update(result)
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
@@ -102,8 +105,14 @@ class BackupService : Service() {
     }
 
     private fun stopBackup() {
+        currentManager?.cancel()
         backupJob?.cancel()
-        BackupState.update(BackupState.progress.value.copy(running = false, message = "Respaldo detenido"))
+        BackupState.update(BackupState.progress.value.copy(
+            running = false, 
+            message = "Cancelado por el usuario",
+            logs = (BackupState.progress.value.logs + BackupLogLine("^C Proceso abortado", LogType.ERROR)).takeLast(50)
+        ))
+        stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
